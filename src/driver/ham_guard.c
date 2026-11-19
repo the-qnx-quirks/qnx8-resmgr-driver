@@ -58,7 +58,13 @@ int main(int argc, char *argv[])
         used += (size_t)n;
     }
 
-    if (ham_connect(0) == -1) {
+    /* At boot, ham may still be starting: retry for up to ~10 seconds. */
+    for (i = 0; i < 20; i++) {
+        if (ham_connect(0) != -1)
+            break;
+        usleep(500000);
+    }
+    if (i == 20) {
         fprintf(stderr, "ham_guard: cannot connect to ham (%s). Is ham running?\n",
                 strerror(errno));
         return 1;
