@@ -1,1 +1,5 @@
 [perms=0755] /proc/boot/my_driver = @BIN@
+[perms=0755] /proc/boot/ham_guard = @BINDIR@/ham_guard
+[perms=0755] /proc/boot/ham = @QNX_TARGET@/@ARCH@/usr/sbin/ham
+[perms=0755] /proc/boot/hamctrl = @QNX_TARGET@/@ARCH@/usr/sbin/hamctrl
+[perms=0755] /proc/boot/libham.so.2 = @QNX_TARGET@/@ARCH@/usr/lib/libham.so.2
