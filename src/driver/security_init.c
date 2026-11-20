@@ -5,28 +5,37 @@
 #define _GNU_SOURCE
 #include "security_init.h"
 #include <sys/types.h>
-#include <sys/slog2.h>
 #include <string.h>
 #include <errno.h>
 
-/* Static state so we only do the lockdown once */
+/*
+ * Static state so we only do the security init once per process lifetime.
+ * After security_init() runs, the microkernel abilities are locked and
+ * the process has dropped to non-root UID/GID.
+ */
 static int g_security_init_done = 0;
 
 /*
- * Log one line through the slog2 DEFAULT buffer.
- * slog2 needs a registered buffer; the main program is expected to call
- * slog2_register() and slog2_set_default_buffer() before using this module.
- * If no default buffer exists, fall back to stderr so the message is not lost.
+ * security_init - Full least-privilege security initialization.
+ * Must be called AFTER resmgr_attach() and hardware MMIO/IRQ initialization.
+ *
+ * Steps:
+ *   1. Deny ALL microkernel abilities via PROCMGR_DN_ALL.
+ *      After this, no process code can acquire any ability, even as root.
+ *   2. Allow ONLY the four required abilities and lock them permanently:
+ *      PROCMGR_AID_MEM_PHYS  (mmap_device_memory)
+ *      PROCMGR_AID_INTERRUPT (InterruptAttachEvent)
+ *      PROCMGR_AID_IO        (in32/out32)
+ *      PROCMGR_AID_PUBLIC_CHANNEL (ChannelCreate, pulse paths)
+ *      using PROCMGR_AOP_ALLOW | PROCMGR_AOP_LOCK.
+ *   3. Drop group privilege first (setgid), then user privilege (setuid),
+ *      as POSIX requires setgid() before setuid() to prevent privilege
+ *      escalation gaps via setresuid/setresgid.
+ *   4. Log every transition to slog2 with clear errno diagnostics.
+ *
+ * Returns 0 on success, -1 on error with errno set.
  */
-static void security_log(const char *text)
-{
-    if (slog2f(NULL, 0, SLOG2_INFO, "%s", text) < 0) {
-        fprintf(stderr, "security_init: slog2f failed (%s): %s\n",
-                strerror(errno), text);
-    }
-}
-
-int security_init_hw_privileges(void)
+int security_init(uid_t target_uid, gid_t target_gid)
 {
     int status = 0;
 
@@ -35,100 +44,108 @@ int security_init_hw_privileges(void)
         return -1;
     }
 
-    /* --- Step 1: Lock down ONLY the three hardware abilities --- */
-    /* PROCMGR_AOP_ALLOW | PROCMGR_AOP_LOCK: allow and lock these */
-    status = procmgr_ability(HW_ABILITIES_ALLOW,
+    /* --- Step 1: Deny ALL microkernel abilities --- */
+    /* PROCMGR_DN_ALL: deny every ability in the system domain.
+     * After this call, no ability can be acquired unless explicitly re-enabled
+     * by a process running as UID 0 before the lockdown. */
+    status = procmgr_ability(0, PROCMGR_DN_ALL);
+    if (status == -1) {
+        fprintf(stderr,
+            "security_init: procmgr_ability DN_ALL failed: %s\n",
+            strerror(errno));
+        return -1;
+    }
+
+    /* --- Step 2: Allow ONLY the four required abilities and lock them --- */
+    /* PROCMGR_AOP_ALLOW | PROCMGR_AOP_LOCK: allow these specific abilities
+     * and permanently lock them so no future process (even as root) can enable
+     * other abilities. */
+    uint32_t allowed_abilities =
+        PROCMGR_AID_IO |
+        PROCMGR_AID_INTERRUPT |
+        PROCMGR_AID_MEM_PHYS |
+        PROCMGR_AID_PUBLIC_CHANNEL;
+
+    status = procmgr_ability(allowed_abilities,
                              PROCMGR_AOP_ALLOW | PROCMGR_AOP_LOCK);
     if (status == -1) {
         fprintf(stderr,
-            "security_init_hw_privileges: procmgr_ability ALLOW failed: "
-            "%s\n", strerror(errno));
+            "security_init: procmgr_ability ALLOW failed: %s\n",
+            strerror(errno));
+        /* Cannot recover - we've already denied all above. Return error. */
         return -1;
     }
 
-    /* --- Step 2: Explicitly DENY all remaining abilities --- */
-    /* PROCMGR_AOP_DENY | PROCMGR_AOP_LOCK: deny and lock the rest */
-    status = procmgr_ability(ALL_ABILITIES_EOL,
-                             PROCMGR_AOP_DENY | PROCMGR_AOP_LOCK);
+    /* --- Step 3: Drop root privileges --- */
+    /* POSIX requires setgid() before setuid() to prevent privilege escalation
+     * via setresuid/setresgid gaps. We drop to the target non-root UID/GID
+     * (default 1000:1000), which should be an unprivileged user created
+     * for the sensor driver during container/VM init. */
+
+    status = setgid(target_gid);
     if (status == -1) {
         fprintf(stderr,
-            "security_init_hw_privileges: procmgr_ability DENY failed: "
-            "%s\n", strerror(errno));
+            "security_init: setgid(%d) failed: %s\n",
+            (int)target_gid, strerror(errno));
+        /* Cannot easily undo the DN_ALL lockdown from here; return error. */
         return -1;
     }
 
-    /* --- Step 3: Log the transition to slog2 --- */
-    /* Since we're still UID 0 at this point, we can write slog2 */
-    security_log("security: hw_privileges locked -> "
-                 "PROCMGR_AID_IO|AID_INTERRUPT|AID_MEM_PHYS "
-                 "allowed and locked");
+    status = setuid(target_uid);
+    if (status == -1) {
+        /* Best-effort: try to restore gid to 0 so the process isn't stuck
+         * in a bad state, though the ability lockdown is already in effect. */
+        setgid(0);
+        fprintf(stderr,
+            "security_init: setuid(%d) failed: %s\n",
+            (int)target_uid, strerror(errno));
+        return -1;
+    }
+
+    /* --- Step 4: Log the security transition to slog2 --- */
+    {
+        char logbuf[128];
+        int len;
+        /* Log the lockdown step */
+        len = snprintf(logbuf, sizeof(logbuf),
+            "security_init: abilities locked -> "
+            "IO|INTERRUPT|MEM_PHYS|PUBLIC_CHANNEL allowed and locked");
+        if (slog2f(NULL, 0, SLOG2_INFO, "%s", logbuf) < 0) {
+            fprintf(stderr,
+                "security_init: slog2f log failed: %s\n",
+                strerror(errno));
+            /* Not fatal - abilities are already locked */
+        }
+
+        /* Log the UID/GID drop step */
+        len = snprintf(logbuf, sizeof(logbuf),
+            "security_init: dropped root -> UID=%d GID=%d",
+            (int)getuid(), (int)getgid());
+        if (slog2f(NULL, 0, SLOG2_INFO, "%s", logbuf) < 0) {
+            fprintf(stderr,
+                "security_init: slog2f log failed: %s\n",
+                strerror(errno));
+            /* Not fatal - privilege drop is already complete */
+        }
+    }
 
     g_security_init_done = 1;
     return 0;
 }
 
-int security_drop_root(void)
-{
-    int status = 0;
-
-    if (!g_security_init_done) {
-        errno = EPERM;
-        fprintf(stderr,
-            "security_drop_root: security_init_hw_privileges() must be "
-            "called first\n");
-        return -1;
-    }
-
-    /* --- Step 4: Deny all abilities EOL (extra safety lock) --- */
-    /* This ensures even if something later tries to re-enable, it can't */
-    status = procmgr_ability(PROCMGR_AID_EOL,
-                             PROCMGR_AOP_DENY | PROCMGR_AOP_LOCK);
-    if (status == -1) {
-        fprintf(stderr,
-            "security_drop_root: final procmgr_ability EOL deny failed: "
-            "%s\n", strerror(errno));
-        /* Not fatal - hardware abilities are already locked */
-    }
-
-    /* --- Step 5: Drop group privilege first, then user privilege ---
-     *   POSIX requires setgid() before setuid() in most implementations
-     *   to prevent privilege escalation via setresuid/setresgid gaps. */
-    status = setgid(TARGET_GID);
-    if (status == -1) {
-        fprintf(stderr,
-            "security_drop_root: setgid(%d) failed: %s\n",
-            (int)TARGET_GID, strerror(errno));
-        return -1;
-    }
-
-    status = setuid(TARGET_UID);
-    if (status == -1) {
-        fprintf(stderr,
-            "security_drop_root: setuid(%d) failed: %s\n",
-            (int)TARGET_UID, strerror(errno));
-        /* Attempt to restore gid - best effort */
-        setgid(0);
-        return -1;
-    }
-
-    /* --- Step 6: Log the UID/GID drop to slog2 --- */
-    {
-        char logbuf[96];
-        snprintf(logbuf, sizeof(logbuf),
-            "security: dropped root -> UID=%d GID=%d",
-            (int)getuid(), (int)getgid());
-        security_log(logbuf);
-    }
-
-    g_security_init_done = 0; /* Reset so re-init is possible after exec */
-    return 0;
-}
-
+/*
+ * security_get_target_uid - Return the target non-root UID (set at compile time
+ * via TARGET_UID default 1000, or overridden at runtime).
+ */
 uid_t security_get_target_uid(void)
 {
     return TARGET_UID;
 }
 
+/*
+ * security_get_target_gid - Return the target non-root GID (set at compile time
+ * via TARGET_GID default 1000, or overridden at runtime).
+ */
 gid_t security_get_target_gid(void)
 {
     return TARGET_GID;

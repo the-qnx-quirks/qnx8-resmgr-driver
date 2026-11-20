@@ -288,7 +288,7 @@ dispatch_t *sensor_resmgr_init(void)
     io_funcs.unblock   = io_unblock;
     io_funcs.close_ocb = io_close_ocb;
 
-    iofunc_attr_init(&attr, S_IFCHR | 0666, NULL, NULL);
+    iofunc_attr_init(&attr, S_IFCHR | 0660, NULL, NULL);
     sensor_notify_init(g_notify);
 
     if (resmgr_attach(dpp, &rattr, SENSOR_DEV_PATH, _FTYPE_ANY, 0,
