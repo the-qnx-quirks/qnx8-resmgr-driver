@@ -31,8 +31,18 @@ Setup:
   * The first --rebuild-image in an empty workspace creates it:
     mkqnximage --type=<vbox|qemu> --ssh-ident=<your .pub> --build
   * Snippets live in <root>/bsp/*.custom. In bsp/ifs_files.custom (and any other
-    snippet) the words @BIN@ (path of the compiled binary) and @NAME@ (the binary
-    name) are filled in at sync time, so no machine-specific path is committed.
+    snippet) these words are filled in at sync time, so no machine-specific path
+    is committed:
+      @BIN@         full path of the compiled binary
+      @NAME@        the binary name
+      @ARCH@        x86_64 or aarch64le
+      @BINDIR@      folder holding the compiled binaries for this architecture
+                    (where --extra programs are written)
+      @QNX_TARGET@  the SDP's target folder (from $QNX_TARGET, or found next to
+                    the SDP environment script)
+  * -D NAME[=VALUE] defines a preprocessor macro for every compile, e.g. -D USE_THREAD_POOL.
+  * --extra NAME:LIBS:SOURCE compiles one more program into the same bin folder so
+    snippets can put it in the image, e.g. --extra ham_guard:ham:src/driver/ham_guard.c
 """
 
 from __future__ import annotations
@@ -71,6 +81,8 @@ CUSTOM_QEMU_PORT = 2222
 IP_PATTERN = re.compile(r"\b\d{1,3}(?:\.\d{1,3}){3}\b")
 SAFE_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 SAFE_LIB = re.compile(r"^[A-Za-z0-9_+.-]+$")
+SAFE_DEFINE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(=[A-Za-z0-9_.+-]*)?$")
+PLACEHOLDERS = ("@BIN@", "@NAME@", "@ARCH@", "@BINDIR@", "@QNX_TARGET@")
 
 
 PERMISSION_HINT = ("Hint: the target did not accept your key. The image probably has no key in it. "
@@ -99,6 +111,12 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
                    help="Libraries to link, without the -l prefix, e.g. -l slog2 socket.")
     p.add_argument("-I", "--include", action="append", type=Path, default=[], metavar="DIR",
                    help="Extra header folder for the compiler (repeatable). <root>/include is always added if it exists.")
+    p.add_argument("-D", "--define", action="append", default=[], metavar="NAME[=VALUE]",
+                   help="Preprocessor define for every compile (repeatable), e.g. -D USE_THREAD_POOL.")
+    p.add_argument("--extra", action="append", default=[], metavar="NAME:LIBS:SOURCE",
+                   help="Also compile SOURCE into <bin>/<arch>/NAME, linking the comma-separated LIBS "
+                        "(may be empty), so a snippet can add it to the image via @BINDIR@. "
+                        "Repeatable. Example: ham_guard:ham:src/driver/ham_guard.c")
     p.add_argument("--target", choices=TARGETS, default="vbox", help="Target kind (default: vbox).")
     p.add_argument("--arch", choices=ARCH_COMPILERS,
                    help="CPU architecture (default: x86_64, or aarch64le for --target pi).")
@@ -192,6 +210,28 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         if not d.is_dir():
             p.error(f"Include folder not found: {d}")
     args.include = include_dirs
+
+    for define in args.define:
+        if not SAFE_DEFINE.fullmatch(define):
+            p.error(f"Unsupported -D value: {define} (use NAME or NAME=VALUE with simple characters).")
+
+    extras = []
+    for spec in args.extra:
+        parts = spec.split(":", 2)  # the source is last, so a Windows drive letter in it is fine
+        if len(parts) != 3:
+            p.error(f"--extra needs NAME:LIBS:SOURCE, got: {spec}")
+        extra_name, extra_libs, extra_src = parts
+        if not SAFE_NAME.fullmatch(extra_name) or extra_name in {".", ".."}:
+            p.error(f"--extra: unsupported program name: {extra_name}")
+        lib_list = [lib for lib in extra_libs.split(",") if lib]
+        for lib in lib_list:
+            if not SAFE_LIB.fullmatch(lib):
+                p.error(f"--extra: unsupported library name: {lib}")
+        extra_path = Path(extra_src).expanduser().resolve()
+        if not extra_path.is_file():
+            p.error(f"--extra: source file not found: {extra_path}")
+        extras.append((extra_name, [extra_path], lib_list))
+    args.extra = extras
 
     resolved = []
     for source in args.sources:
@@ -383,8 +423,27 @@ def check_workspace(args: argparse.Namespace) -> bool:
     return True
 
 
-def render(text: str, binary: Path, name: str) -> str:
-    return text.replace("@BIN@", binary.as_posix()).replace("@NAME@", name)
+def qnx_target_dir(args: argparse.Namespace) -> Path:
+    """The SDP's target folder (the one that holds x86_64/ and aarch64le/)."""
+    candidates = []
+    if os.environ.get("QNX_TARGET"):
+        candidates.append(Path(os.environ["QNX_TARGET"]))
+    if args.sdp_env:
+        candidates.append(args.sdp_env.parent / "target" / "qnx")
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate.resolve()
+    raise CommandError("A snippet uses @QNX_TARGET@ but the SDP target folder was not found. "
+                       "Set QNX_TARGET (load the SDP environment) or pass --sdp-env.")
+
+
+def render(text: str, args: argparse.Namespace, binary: Path, name: str) -> str:
+    text = text.replace("@BIN@", binary.as_posix()).replace("@NAME@", name)
+    text = text.replace("@ARCH@", args.arch)
+    text = text.replace("@BINDIR@", (args.bin_dir / args.arch).as_posix())
+    if "@QNX_TARGET@" in text:
+        text = text.replace("@QNX_TARGET@", qnx_target_dir(args).as_posix())
+    return text
 
 
 def sync_snippets(args: argparse.Namespace, binary: Path) -> None:
@@ -407,7 +466,7 @@ def sync_snippets(args: argparse.Namespace, binary: Path) -> None:
     if template:
         text = template.read_text()
         if "@BIN@" in text:
-            generated = render(text, binary, args.output)
+            generated = render(text, args, binary, args.output)
         else:
             print(f"[warn] {template} has no @BIN@ placeholder, so it was not used. "
                   "A line with the right path was generated instead.")
@@ -415,8 +474,8 @@ def sync_snippets(args: argparse.Namespace, binary: Path) -> None:
 
     for name, src in sources.items():
         text = src.read_text()
-        if "@BIN@" in text or "@NAME@" in text:
-            (dest / name).write_text(render(text, binary, args.output))
+        if any(placeholder in text for placeholder in PLACEHOLDERS):
+            (dest / name).write_text(render(text, args, binary, args.output))
         else:
             shutil.copy2(src, dest / name)
     print(f"Synced {len(sources) + 1} snippet(s) into {dest}")
@@ -448,13 +507,24 @@ def build_image(args: argparse.Namespace, configured: bool) -> None:
 def build_binary(args: argparse.Namespace) -> Path | None:
     if not args.sources:
         return None
+    return compile_program(args, args.sources, args.libs, args.output)
+
+
+def build_extras(args: argparse.Namespace) -> None:
+    for name, sources, libs in args.extra:
+        compile_program(args, sources, libs, name)
+
+
+def compile_program(args: argparse.Namespace, source_files: Sequence[Path],
+                    lib_names: Sequence[str], name: str) -> Path:
     out_dir = args.bin_dir / args.arch
     out_dir.mkdir(parents=True, exist_ok=True)
-    binary = out_dir / args.output
-    sources = " ".join(qpath(s) for s in args.sources)
-    libs = " ".join(f"-l{lib}" for lib in args.libs)
+    binary = out_dir / name
+    sources = " ".join(qpath(s) for s in source_files)
+    libs = " ".join(f"-l{lib}" for lib in lib_names)
     includes = " ".join(f"-I {qpath(d)}" for d in args.include)
-    command = f"qcc -V{ARCH_COMPILERS[args.arch]} {includes} {sources} {libs} -o {qpath(binary)}"
+    defines = " ".join(f"-D{d}" for d in args.define)
+    command = f"qcc -V{ARCH_COMPILERS[args.arch]} {includes} {defines} {sources} {libs} -o {qpath(binary)}"
     print(f"Compiling for {args.arch} -> {binary}...")
     result = run_qnx(command, args.sdp_env)
     for text in (result.stdout, result.stderr):
@@ -562,6 +632,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
 
         binary = build_binary(args)
+        build_extras(args)
 
         rebuilt = False
         if managed:

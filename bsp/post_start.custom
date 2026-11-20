@@ -1,1 +1,2 @@
-/proc/boot/my_driver &
+/proc/boot/ham
+/proc/boot/ham_guard sensor /proc/boot/my_driver
