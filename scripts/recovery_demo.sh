@@ -1,69 +1,122 @@
 #!/bin/sh
-# recovery_demo.sh -- QNX 8.0 HAM Watchdog & Concurrency Monitoring Test (Zaid)
+# recovery_demo.sh -- QNX 8.0 HAM Watchdog & Concurrency Verification
+# Assumes the boot image has already started `ham` and `ham_guard sensor /proc/boot/my_driver`.
 
-DRIVER_BIN="/tmp/sensor_driver"
-DRIVER_NAME="sensor_driver"
+DRIVER_NAME="my_driver"
+DEV_NODE="/dev/sensor0"
+HAM_ENTRY="/proc/ham/sensor"
+FAIL_COUNT=0
 
-echo "=========================================="
-echo " PART 1: WATCHDOG TEST (HAM AUTO-RESTART)"
-echo "=========================================="
+get_driver_pid() {
+    pidin -p "$DRIVER_NAME" -F "%a" 2>/dev/null | grep -E '^[[:space:]]*[0-9]+' | head -n 1 | tr -d ' '
+}
 
-echo "[1] Starting QNX High Availability Manager (ham)..."
-if ! pidin -p ham >/dev/null 2>&1; then
-    ham &
-    sleep 1
-fi
-
-echo "[2] Starting $DRIVER_NAME and recording initial PID..."
-slay -f "$DRIVER_NAME" >/dev/null 2>&1
-"$DRIVER_BIN" &
-OLD_PID=$!
-sleep 1
-
-echo "Initial Driver PID: $OLD_PID"
-pidin -p "$OLD_PID" -F "%a %b %N %P"
-
-echo "[3] Registering HAM self-healing guardian rule..."
-sh -c '
-    TARGET_PID="$1"
-    BIN_PATH="$2"
-    while true; do
-        if ! kill -0 "$TARGET_PID" 2>/dev/null; then
-            "$BIN_PATH" >/dev/null 2>&1 &
-            TARGET_PID=$!
+wait_for_recovery() {
+    OLD_PID="$1"
+    i=0
+    while [ "$i" -lt 10 ]; do
+        NEW_PID=$(get_driver_pid)
+        if [ -n "$NEW_PID" ] && [ "$NEW_PID" != "$OLD_PID" ] && [ -e "$DEV_NODE" ]; then
+            echo "$NEW_PID"
+            return 0
         fi
         sleep 1
+        i=$((i + 1))
     done
-' -- "$OLD_PID" "$DRIVER_BIN" &
-WATCHDOG_PID=$!
+    return 1
+}
 
-echo "[4] Simulating fatal driver crash with 'slay -f $DRIVER_NAME'..."
-slay -f "$DRIVER_NAME"
-sleep 2
+echo "=========================================="
+echo " 1. CHECKING HAM & GUARDIAN REGISTRATION"
+echo "=========================================="
 
-NEW_PID=$(pidin -p "$DRIVER_NAME" -F "%a" | grep -E '^[[:space:]]*[0-9]+' | head -n 1 | tr -d ' ')
-echo "Recovered Driver PID: $NEW_PID"
-pidin -p "$DRIVER_NAME" -F "%a %b %N %P"
-
-if [ -n "$NEW_PID" ] && [ "$OLD_PID" != "$NEW_PID" ]; then
-    echo "PASS: Watchdog revived $DRIVER_NAME (PID $OLD_PID -> $NEW_PID)"
+if pidin -p ham -F "%a" 2>/dev/null | grep -qE '^[[:space:]]*[0-9]+'; then
+    echo "PASS: ham daemon is running"
 else
-    echo "FAIL: Driver did not restart with a new PID"
+    echo "FAIL: ham daemon is not running"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+if [ -e "$HAM_ENTRY" ] || ls /proc/ham 2>/dev/null | grep -q "sensor"; then
+    echo "PASS: 'sensor' entity is registered in /proc/ham"
+else
+    echo "FAIL: 'sensor' entity not found in /proc/ham"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
 fi
 
 echo "=========================================="
-echo " PART 2: CONCURRENCY & MONITORING TEST"
+echo " 2. WATCHDOG RECOVERY (SIGTERM & SIGSEGV)"
 echo "=========================================="
 
-echo "[5] Checking /dev/sensor0 device node & worker threads..."
-ls -l /dev/sensor0
-pidin -p "$DRIVER_NAME" threads
+PID1=$(get_driver_pid)
+if [ -z "$PID1" ]; then
+    echo "FAIL: $DRIVER_NAME is not running initially"
+    exit 1
+fi
+echo "Initial $DRIVER_NAME PID: $PID1"
 
-echo "[6] Spawning 4 concurrent clients reading /dev/sensor0 simultaneously..."
+# Test A: Normal termination (SIGTERM)
+kill "$PID1" 2>/dev/null
+PID2=$(wait_for_recovery "$PID1")
+if [ $? -eq 0 ]; then
+    echo "PASS [kill]: $DRIVER_NAME recovered (PID $PID1 -> $PID2) and $DEV_NODE is back"
+else
+    echo "FAIL [kill]: $DRIVER_NAME did not recover within 10s"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+    PID2=$(get_driver_pid)
+fi
+
+# Test B: Crash simulation (SIGSEGV)
+if [ -n "$PID2" ]; then
+    kill -SEGV "$PID2" 2>/dev/null
+    PID3=$(wait_for_recovery "$PID2")
+    if [ $? -eq 0 ]; then
+        echo "PASS [kill -SEGV]: $DRIVER_NAME recovered (PID $PID2 -> $PID3) and $DEV_NODE is back"
+    else
+        echo "FAIL [kill -SEGV]: $DRIVER_NAME did not recover within 10s"
+        FAIL_COUNT=$((FAIL_COUNT + 1))
+    fi
+fi
+
+echo "=========================================="
+echo " 3. PARALLEL CLIENTS & THREAD POOL CHECK"
+echo "=========================================="
+
+THREAD_COUNT=$(pidin -p "$DRIVER_NAME" threads 2>/dev/null | grep -E '^[[:space:]]*[0-9]+' | wc -l | tr -d ' ')
+echo "Active $DRIVER_NAME threads: $THREAD_COUNT (thread pool active if built with -DUSE_THREAD_POOL)"
+if [ "$THREAD_COUNT" -lt 1 ]; then
+    echo "FAIL: No active threads found for $DRIVER_NAME"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+# Spawn 4 parallel clients accessing /dev/sensor0 concurrently without racing on RESET
+PIDS=""
 for i in 1 2 3 4; do
-    cat /dev/sensor0 >/dev/null 2>&1 &
+    ( exec < "$DEV_NODE" ) >/dev/null 2>&1 &
+    PIDS="$PIDS $!"
 done
-sleep 1
-echo "PASS: Concurrent multi-client reads completed without blocking."
 
-kill "$WATCHDOG_PID" 2>/dev/null
+CLIENT_ERRORS=0
+for p in $PIDS; do
+    wait "$p"
+    RC=$?
+    if [ "$RC" -ne 0 ]; then
+        CLIENT_ERRORS=$((CLIENT_ERRORS + 1))
+    fi
+done
+
+if [ "$CLIENT_ERRORS" -eq 0 ]; then
+    echo "PASS: All 4 parallel clients opened/accessed $DEV_NODE cleanly (exit 0)"
+else
+    echo "FAIL: $CLIENT_ERRORS of 4 parallel clients failed"
+    FAIL_COUNT=$((FAIL_COUNT + 1))
+fi
+
+echo "=========================================="
+if [ "$FAIL_COUNT" -eq 0 ]; then
+    echo "OVERALL RESULT: PASS"
+    exit 0
+else
+    echo "OVERALL RESULT: FAIL ($FAIL_COUNT check(s) failed)"
+    exit 1
+fi
