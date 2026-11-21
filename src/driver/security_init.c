@@ -4,6 +4,7 @@
  *===========================================================================*/
 #define _GNU_SOURCE
 #include "security_init.h"
+#include <stdint.h>
 #include <sys/types.h>
 #include <string.h>
 #include <errno.h>
@@ -22,28 +23,28 @@ static int g_security_init_done = 0;
  * and permanently lock the four required ones (IO, INTERRUPT, MEM_PHYS, PUBLIC_CHANNEL).
  * Must be called before security_drop_root().
  *
- * QNX SDP 8.0 Ability Domain Strategy:
- *   - PROCOMGR_ADN_ROOT:   abilities in the root domain
- *   - PROCOMGR_ADN_NONROOT: abilities in the non-root domain
- *   - PROCOMGR_AOP_ALLOW | PROCOMGR_AOP_LOCK: allow and permanently lock
- *     the specified abilities in both domains
- *   - PROCOMGR_AOP_DENY:   deny the specified abilities
- *   - PROCOMGR_AID_EOL:    terminates the tuple list
+ * QNX SDP 8.0 Ability Domain Strategy (single procmgr_ability() call with tuples):
+ *   - Each tuple is: (domain-flags | operation-flags | ability-ID)
+ *   - Tuples are separated by their operation/ability arguments
+ *   - The list is terminated with PROCOMGR_AID_EOL
+ *   - PROCOMGR_AOP_SUBRANGE with (uint64_t) min/max is used for SETUID/SETGID
+ *     to scope them ONLY to PROCOMGR_ADN_ROOT (keeps them denied in NONROOT
+ *     so the process cannot re-escalate after dropping root).
  *
- * Critical: SetUID/SetGID abilities must be allowed in the ROOT domain only
- * (so security_drop_root() can call setgid()/setuid()), but explicitly
- * denied in the NONROOT domain (so the process cannot re-escalate after dropping).
+ * Tuple order in the single procmgr_ability() call:
+ *   1. Allow MEM_PHYS in both domains
+ *   2. Allow INTERRUPT in both domains
+ *   3. Allow IO in both domains
+ *   4. Allow PUBLIC_CHANNEL in both domains
+ *   5. Allow SETUID only in ROOT domain, with subrange [SENSOR_DRIVER_UID, SENSOR_DRIVER_UID]
+ *   6. Allow SETGID only in ROOT domain, with subrange [SENSOR_CLIENT_GID, SENSOR_CLIENT_GID]
+ *   7. Deny ALL remaining abilities in BOTH domains, terminating with PROCOMGR_AID_EOL
  *
- * Tuple order matters:
- *   1. Allow MEM_PHYS in both domains (mmap_device_memory)
- *   2. Allow INTERRUPT in both domains (InterruptAttachEvent)
- *   3. Allow IO in both domains (in32/out32)
- *   4. Allow PUBLIC_CHANNEL in both domains (pulse paths)
- *   5. Allow SETUID only in ROOT domain (for security_drop_root())
- *   6. Allow SETGID only in ROOT domain (for security_drop_root())
- *   7. Deny ALL remaining abilities, terminating with PROCOMGR_AID_EOL
+ * Critical: SETUID/SETGID are allowed only in PROCOMGR_ADN_ROOT with subrange
+ * matching the target UID/GID. In PROCOMGR_ADN_NONROOT they are automatically
+ * denied and permanently locked after the root drop, preventing re-escalation.
  *
- * Returns 0 on success, -1 on error.
+ * Returns 0 on success, -1 on error with errno set.
  */
 int security_init_hw_privileges(void)
 {
@@ -54,95 +55,30 @@ int security_init_hw_privileges(void)
         return -1;
     }
 
-    /* --- Step 1: Allow only the four required abilities in both domains --- */
-    /* MEM_PHYS: physically map device memory */
-    status = procmgr_ability(
-        PROCOMGR_ADN_ROOT | PROCOMGR_ADN_NONROOT,
-        PROCOMGR_AOP_ALLOW | PROCOMGR_AOP_LOCK | PROCOMGR_AID_MEM_PHYS);
-    if (status == -1) {
-        fprintf(stderr,
-            "security_init_hw_privileges: procmgr_ability MEM_PHYS failed: %s\n",
-            strerror(errno));
-        return -1;
-    }
-
-    /* INTERRUPT: attach to hardware interrupts */
-    status = procmgr_ability(
-        PROCOMGR_ADN_ROOT | PROCOMGR_ADN_NONROOT,
-        PROCOMGR_AOP_ALLOW | PROCOMGR_AOP_LOCK | PROCOMGR_AID_INTERRUPT);
-    if (status == -1) {
-        fprintf(stderr,
-            "security_init_hw_privileges: procmgr_ability INTERRUPT failed: %s\n",
-            strerror(errno));
-        return -1;
-    }
-
-    /* IO: perform I/O port reads/writes */
-    status = procmgr_ability(
-        PROCOMGR_ADN_ROOT | PROCOMGR_ADN_NONROOT,
-        PROCOMGR_AOP_ALLOW | PROCOMGR_AOP_LOCK | PROCOMGR_AID_IO);
-    if (status == -1) {
-        fprintf(stderr,
-            "security_init_hw_privileges: procmgr_ability IO failed: %s\n",
-            strerror(errno));
-        return -1;
-    }
-
-    /* PUBLIC_CHANNEL: use pulse channels (ChannelCreate, InterruptAttachEvent) */
-    status = procmgr_ability(
-        PROCOMGR_ADN_ROOT | PROCOMGR_ADN_NONROOT,
-        PROCOMGR_AOP_ALLOW | PROCOMGR_AOP_LOCK | PROCOMGR_AID_PUBLIC_CHANNEL);
-    if (status == -1) {
-        fprintf(stderr,
-            "security_init_hw_privileges: procmgr_ability PUBLIC_CHANNEL failed: %s\n",
-            strerror(errno));
-        return -1;
-    }
-
-    /* --- Step 2: Allow SETUID and SETGID ONLY in the ROOT domain ---
-     * This allows security_drop_root() to call setgid()/setuid().
-     * Explicitly NOT allowed in NONROOT domain so the process cannot
-     * re-escalate after dropping root. */
-    status = procmgr_ability(
-        PROCOMGR_ADN_ROOT,
-        PROCOMGR_AOP_ALLOW | PROCOMGR_AID_SETUID);
-    if (status == -1) {
-        fprintf(stderr,
-            "security_init_hw_privileges: procmgr_ability SETUID (root) failed: %s\n",
-            strerror(errno));
-        return -1;
-    }
+    /* Single procmgr_ability() call with 7 tuples terminated by PROCOMGR_AID_EOL:
+     * Tuple 1: Allow MEM_PHYS in both domains */
+    /* Tuple 2: Allow INTERRUPT in both domains */
+    /* Tuple 3: Allow IO in both domains */
+    /* Tuple 4: Allow PUBLIC_CHANNEL in both domains */
+    /* Tuple 5: Allow SETUID only in ROOT domain, subrange [SENSOR_DRIVER_UID, SENSOR_DRIVER_UID] */
+    /* Tuple 6: Allow SETGID only in ROOT domain, subrange [SENSOR_CLIENT_GID, SENSOR_CLIENT_GID] */
+    /* Tuple 7: Deny ALL remaining abilities in BOTH domains, terminate with PROCOMGR_AID_EOL */
 
     status = procmgr_ability(
-        PROCOMGR_ADN_ROOT,
-        PROCOMGR_AOP_ALLOW | PROCOMGR_AID_SETGID);
-    if (status == -1) {
-        fprintf(stderr,
-            "security_init_hw_privileges: procmgr_ability SETGID (root) failed: %s\n",
-            strerror(errno));
-        return -1;
-    }
+        0,
+        PROCOMGR_ADN_ROOT | PROCOMGR_ADN_NONROOT | PROCOMGR_AOP_ALLOW | PROCOMGR_AOP_LOCK | PROCOMGR_AID_MEM_PHYS,
+        PROCOMGR_ADN_ROOT | PROCOMGR_ADN_NONROOT | PROCOMGR_AOP_ALLOW | PROCOMGR_AOP_LOCK | PROCOMGR_AID_INTERRUPT,
+        PROCOMGR_ADN_ROOT | PROCOMGR_ADN_NONROOT | PROCOMGR_AOP_ALLOW | PROCOMGR_AOP_LOCK | PROCOMGR_AID_IO,
+        PROCOMGR_ADN_ROOT | PROCOMGR_ADN_NONROOT | PROCOMGR_AOP_ALLOW | PROCOMGR_AOP_LOCK | PROCOMGR_AID_PUBLIC_CHANNEL,
+        PROCOMGR_ADN_ROOT | PROCOMGR_AOP_ALLOW | PROCOMGR_AOP_SUBRANGE | PROCOMGR_AOP_LOCK | PROCOMGR_AID_SETUID,
+        (uint64_t)SENSOR_DRIVER_UID, (uint64_t)SENSOR_DRIVER_UID,
+        PROCOMGR_ADN_ROOT | PROCOMGR_AOP_ALLOW | PROCOMGR_AOP_SUBRANGE | PROCOMGR_AOP_LOCK | PROCOMGR_AID_SETGID,
+        (uint64_t)SENSOR_CLIENT_GID, (uint64_t)SENSOR_CLIENT_GID,
+        PROCOMGR_ADN_ROOT | PROCOMGR_ADN_NONROOT | PROCOMGR_AOP_DENY | PROCOMGR_AOP_LOCK | PROCOMGR_AID_EOL);
 
-    /* --- Step 3: Deny all remaining abilities in BOTH domains ---
-     * The PROCOMGR_AID_EOL terminator is implicit when we use the
-     * sub-range approach. We explicitly deny to ensure nothing leaks. */
-    status = procmgr_ability(
-        PROCOMGR_ADN_NONROOT,
-        PROCOMGR_AOP_DENY | PROCOMGR_AID_SETUID | PROCOMGR_AID_SETGID | PROCOMGR_AID_EOL);
     if (status == -1) {
         fprintf(stderr,
-            "security_init_hw_privileges: procmgr_ability NONROOT DENY failed: %s\n",
-            strerror(errno));
-        return -1;
-    }
-
-    /* Also deny in root domain anything not explicitly allowed above */
-    status = procmgr_ability(
-        PROCOMGR_ADN_ROOT,
-        PROCOMGR_AOP_DENY | PROCOMGR_AID_EOL);
-    if (status == -1) {
-        fprintf(stderr,
-            "security_init_hw_privileges: procmgr_ability ROOT DENY failed: %s\n",
+            "security_init_hw_privileges: procmgr_ability failed: %s\n",
             strerror(errno));
         return -1;
     }
@@ -190,7 +126,7 @@ int security_drop_root(uid_t uid, gid_t gid)
  * Steps:
  *   1. Call security_init_hw_privileges() to lock down the four required
  *      microkernel abilities (IO, Interrupt, Mem_Phys, PUBLIC_CHANNEL)
- *      using per-domain allow/deny tuples with PROCOMGR_AOP_LOCK.
+ *      using the single procmgr_ability() tuple format with PROCOMGR_AOP_LOCK.
  *   2. Call security_drop_root(uid, gid) to drop from UID 0 to the
  *      target non-root UID/GID (default 1000:1000 for qnxuser).
  *   3. Log every transition to slog2 with clear errno diagnostics.
