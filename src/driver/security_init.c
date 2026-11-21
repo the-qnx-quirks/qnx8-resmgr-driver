@@ -8,6 +8,7 @@
 #include <string.h>
 #include <errno.h>
 #include <sys/slog2.h>
+#include <sys/procmgr.h>
 
 /*
  * Static state so we only do the security init once per process lifetime.
@@ -17,56 +18,40 @@
 static int g_security_init_done = 0;
 
 /*
- * security_init_hw_privileges - Deny all non-essential microkernel abilities
- * and permanently lock the four required ones (IO, INTERRUPT, MEM_PHYS, PUBLIC_CHANNEL).
+ * security_init_hw_privileges - Set abilities using variadic tuples terminated
+ * by PROCMGR_AID_EOL. This is the QNX SDP 8.0 way: each call to
+ * procmgr_ability() takes a domain/operation/id tuple, and the argument list
+ * is terminated with a tuple containing PROCMGR_AID_EOL.
+ *
+ * Step 1: Deny all abilities in root and non-root domains, allowing only the
+ *         four required ones (IO, INTERRUPT, MEM_PHYS, PUBLIC_CHANNEL) with
+ *         PROCMGR_AOP_ALLOW | PROCMGR_AOP_LOCK.
+ * Step 2: The final tuple with PROCMGR_AOP_DENY | PROCMGR_AID_EOL explicitly
+ *         denies any remaining abilities.
+ *
  * Must be called before security_drop_root().
  * Returns 0 on success, -1 on error.
- *
- * Step 1: Deny all abilities in the root and non-root domains using
- *         PROCMGR_ADN_ROOT | PROCMGR_ADN_NONROOT (QNX SDP 8.0 Ability Domain).
- *         The domain flags are terminated explicitly by PROCMGR_AID_EOL
- *         in the ability set passed in Step 2.
- * Step 2: Allow only the four required abilities and lock them:
- *         PROCMGR_AID_IO | PROCMGR_AID_INTERRUPT | PROCMGR_AID_MEM_PHYS | PROCMGR_AID_PUBLIC_CHANNEL
- *         using PROCMGR_AOP_ALLOW | PROCMGR_AOP_LOCK.
  */
 int security_init_hw_privileges(void)
 {
-    int status = 0;
+    int status;
 
     if (g_security_init_done) {
         errno = EALREADY;
         return -1;
     }
 
-    /* --- Step 1: Deny all abilities in root and non-root domains ---
-     * PROCMGR_DN_ROOT: deny abilities in the root domain
-     * PROCMGR_DN_NONROOT: deny abilities in the non-root domain
-     * Together they cover all ability domains in QNX SDP 8.0. */
-    status = procmgr_ability(0, PROCMGR_ADN_ROOT | PROCMGR_ADN_NONROOT);
+    status = procmgr_ability(
+        0,
+        PROCMGR_ADN_ROOT | PROCMGR_ADN_NONROOT | PROCMGR_AOP_ALLOW | PROCMGR_AID_MEM_PHYS,
+        PROCMGR_ADN_ROOT | PROCMGR_ADN_NONROOT | PROCMGR_AOP_ALLOW | PROCMGR_AID_INTERRUPT,
+        PROCMGR_ADN_ROOT | PROCMGR_ADN_NONROOT | PROCMGR_AOP_ALLOW | PROCMGR_AID_IO,
+        PROCMGR_ADN_ROOT | PROCMGR_ADN_NONROOT | PROCMGR_AOP_ALLOW | PROCMGR_AID_PUBLIC_CHANNEL,
+        PROCMGR_ADN_ROOT | PROCMGR_ADN_NONROOT | PROCMGR_AOP_DENY  | PROCMGR_AID_EOL
+    );
     if (status == -1) {
         fprintf(stderr,
-            "security_init_hw_privileges: procmgr_ability DN_ROOT|DN_NONROOT failed: %s\n",
-            strerror(errno));
-        return -1;
-    }
-
-    /* --- Step 2: Allow only the four required abilities and lock them ---
-     * PROCMGR_AOP_ALLOW | PROCMGR_AOP_LOCK: allow these specific abilities
-     * and permanently lock them so no future process (even as root) can enable
-     * other abilities. */
-    uint32_t allowed =
-        PROCMGR_AID_IO |
-        PROCMGR_AID_INTERRUPT |
-        PROCMGR_AID_MEM_PHYS |
-        PROCMGR_AID_PUBLIC_CHANNEL |
-        PROCMGR_AID_EOL;
-
-    status = procmgr_ability(allowed,
-                             PROCMGR_AOP_ALLOW | PROCMGR_AOP_LOCK);
-    if (status == -1) {
-        fprintf(stderr,
-            "security_init_hw_privileges: procmgr_ability ALLOW failed: %s\n",
+            "security_init_hw_privileges: procmgr_ability failed: %s\n",
             strerror(errno));
         return -1;
     }
@@ -109,11 +94,12 @@ int security_drop_root(uid_t uid, gid_t gid)
 
 /*
  * security_init - Full least-privilege security initialization.
+ *
  * Must be called AFTER resmgr_attach() and hardware MMIO/IRQ initialization.
  *
  * Steps:
  *   1. Call security_init_hw_privileges() to lock down the four required
- *      microkernel abilities (IO, Interrupt, Mem_Phys, Public_Channel).
+ *      microkernel abilities (IO, INTERRUPT, MEM_PHYS, PUBLIC_CHANNEL).
  *   2. Call security_drop_root(uid, gid) to drop from UID 0 to the
  *      target non-root UID/GID (default 1000:1000 for qnxuser).
  *   3. Log every transition to slog2 with clear errno diagnostics.
@@ -163,7 +149,7 @@ int security_init(uid_t target_uid, gid_t target_gid)
             /* Not fatal - abilities are already locked */
         }
 
-        /* Log the UID/GID drop */
+        /* Log the UID/GID drop step */
         len = snprintf(logbuf, sizeof(logbuf),
             "security_init: dropped root -> UID=%d GID=%d",
             (int)getuid(), (int)getgid());
