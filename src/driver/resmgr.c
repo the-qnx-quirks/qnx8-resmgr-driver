@@ -18,9 +18,9 @@
  *   4. security_drop_root()          (drops from UID 0 to non-root UID/GID)
  *
  * Important: resmgr_attach() must be called before security_init_hw_privileges()
- * so that the path-space ability (PROCOMGR_AID_PATHSPACE) is still available.
+ * so that the path-space ability (PROCMGR_AID_PATHSPACE) is still available.
  * After security_init_hw_privileges() runs, the ability mask is permanently
- * locked via PROCOMGR_AOP_LOCK, and no further ability modifications are possible.
+ * locked via PROCMGR_AOP_LOCK, and no further ability modifications are possible.
  *
  * Hooks for teammates are marked  >>> HOOK <<<
  */
