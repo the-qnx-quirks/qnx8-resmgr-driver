@@ -23,9 +23,9 @@ static int g_security_init_done = 0;
  * Returns 0 on success, -1 on error.
  *
  * Step 1: Deny all abilities in the root and non-root domains using
- *         PROCMGR_DN_ROOT | PROCMGR_DN_NONROOT (QNX SDP 8.0 valid domain flags).
- *         The domain flags are terminated implicitly by the ability set
- *         in Step 2; no separate PROCMGR_AID_EOL is needed when locking.
+ *         PROCMGR_ADN_ROOT | PROCMGR_ADN_NONROOT (QNX SDP 8.0 Ability Domain).
+ *         The domain flags are terminated explicitly by PROCMGR_AID_EOL
+ *         in the ability set passed in Step 2.
  * Step 2: Allow only the four required abilities and lock them:
  *         PROCMGR_AID_IO | PROCMGR_AID_INTERRUPT | PROCMGR_AID_MEM_PHYS | PROCMGR_AID_PUBLIC_CHANNEL
  *         using PROCMGR_AOP_ALLOW | PROCMGR_AOP_LOCK.
@@ -43,7 +43,7 @@ int security_init_hw_privileges(void)
      * PROCMGR_DN_ROOT: deny abilities in the root domain
      * PROCMGR_DN_NONROOT: deny abilities in the non-root domain
      * Together they cover all ability domains in QNX SDP 8.0. */
-    status = procmgr_ability(0, PROCMGR_DN_ROOT | PROCMGR_DN_NONROOT);
+    status = procmgr_ability(0, PROCMGR_ADN_ROOT | PROCMGR_ADN_NONROOT);
     if (status == -1) {
         fprintf(stderr,
             "security_init_hw_privileges: procmgr_ability DN_ROOT|DN_NONROOT failed: %s\n",
@@ -59,7 +59,8 @@ int security_init_hw_privileges(void)
         PROCMGR_AID_IO |
         PROCMGR_AID_INTERRUPT |
         PROCMGR_AID_MEM_PHYS |
-        PROCMGR_AID_PUBLIC_CHANNEL;
+        PROCMGR_AID_PUBLIC_CHANNEL |
+        PROCMGR_AID_EOL;
 
     status = procmgr_ability(allowed,
                              PROCMGR_AOP_ALLOW | PROCMGR_AOP_LOCK);
