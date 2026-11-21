@@ -10,10 +10,17 @@
  *   -DUSE_THREAD_POOL    serves clients with Zaid's thread pool instead of 1 thread
  *
  * Startup order in sensor_resmgr_init():
- *   1. create /dev/sensor0 + pulse   (needs path-space ability)
- *   2. security_init_hw_privileges() (locks everything except IO/IRQ/MEM_PHYS)
+ *   1. create /dev/sensor0 + pulse   (needs path-space ability - still available
+ * before security_init_hw_privileges() runs)
+ *   2. security_init_hw_privileges() (locks four required abilities:
+ * IO, INTERRUPT, MEM_PHYS, PUBLIC_CHANNEL, plus SETUID/SETGID for root drop)
  *   3. sensor_hw_init()              (Basith mmap_device_memory, Aeknath InterruptAttachEvent)
- *   4. security_drop_root()
+ *   4. security_drop_root()          (drops from UID 0 to non-root UID/GID)
+ *
+ * Important: resmgr_attach() must be called before security_init_hw_privileges()
+ * so that the path-space ability (PROCOMGR_AID_PATHSPACE) is still available.
+ * After security_init_hw_privileges() runs, the ability mask is permanently
+ * locked via PROCOMGR_AOP_LOCK, and no further ability modifications are possible.
  *
  * Hooks for teammates are marked  >>> HOOK <<<
  */
