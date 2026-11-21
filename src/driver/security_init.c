@@ -7,6 +7,7 @@
 #include <sys/types.h>
 #include <string.h>
 #include <errno.h>
+#include <sys/slog2.h>
 
 /*
  * Static state so we only do the security init once per process lifetime.
@@ -48,7 +49,7 @@ int security_init(uid_t target_uid, gid_t target_gid)
     /* PROCMGR_DN_ALL: deny every ability in the system domain.
      * After this call, no ability can be acquired unless explicitly re-enabled
      * by a process running as UID 0 before the lockdown. */
-    status = procmgr_ability(0, PROCMGR_DN_ALL);
+    status = procmgr_ability(0, PROCMGR_DN_ROOT | PROCMGR_DN_NONROOT);
     if (status == -1) {
         fprintf(stderr,
             "security_init: procmgr_ability DN_ALL failed: %s\n",
@@ -64,7 +65,8 @@ int security_init(uid_t target_uid, gid_t target_gid)
         PROCMGR_AID_IO |
         PROCMGR_AID_INTERRUPT |
         PROCMGR_AID_MEM_PHYS |
-        PROCMGR_AID_PUBLIC_CHANNEL;
+        PROCMGR_AID_PUBLIC_CHANNEL |
+        PROCMGR_AID_EOL;
 
     status = procmgr_ability(allowed_abilities,
                              PROCMGR_AOP_ALLOW | PROCMGR_AOP_LOCK);
@@ -149,4 +151,73 @@ uid_t security_get_target_uid(void)
 gid_t security_get_target_gid(void)
 {
     return TARGET_GID;
+}
+
+/*
+ * security_init_hw_privileges - Deny all non‑essential microkernel abilities
+ * and permanently lock the four required ones (IO, INTERRUPT, MEM_PHYS, PUBLIC_CHANNEL).
+ * Must be called before security_drop_root().
+ * Returns 0 on success, -1 on error.
+ */
+int security_init_hw_privileges(void)
+{
+    int status;
+
+    /* Step 1: Deny all abilities in the root and non‑root domains */
+    status = procmgr_ability(0, PROCMGR_DN_ROOT | PROCMGR_DN_NONROOT);
+    if (status == -1) {
+        fprintf(stderr,
+            "security_init_hw_privileges: procmgr_ability DN_ROOT|NONROOT failed: %s\n",
+            strerror(errno));
+        return -1;
+    }
+
+    /* Step 2: Allow only the four required abilities and lock them */
+    uint32_t allowed =
+        PROCMGR_AID_IO |
+        PROCMGR_AID_INTERRUPT |
+        PROCMGR_AID_MEM_PHYS |
+        PROCMGR_AID_PUBLIC_CHANNEL;
+    status = procmgr_ability(allowed,
+                             PROCMGR_AOP_ALLOW | PROCMGR_AOP_LOCK);
+    if (status == -1) {
+        fprintf(stderr,
+            "security_init_hw_privileges: procmgr_ability ALLOW failed: %s\n",
+            strerror(errno));
+        return -1;
+    }
+
+    return 0;
+}
+
+/*
+ * security_drop_root - Drop from UID 0 to the target non‑root UID/GID.
+ * POSIX requires setgid() before setuid().
+ * Returns 0 on success, -1 on error with errno set.
+ */
+int security_drop_root(uid_t uid, gid_t gid)
+{
+    int status;
+
+    /* Drop group privilege first */
+    status = setgid(gid);
+    if (status == -1) {
+        fprintf(stderr,
+            "security_drop_root: setgid(%d) failed: %s\n",
+            (int)gid, strerror(errno));
+        return -1;
+    }
+
+    /* Drop user privilege */
+    status = setuid(uid);
+    if (status == -1) {
+        /* Best‑effort restore of gid to 0 so the process isn’t stuck in a bad state */
+        setgid(0);
+        fprintf(stderr,
+            "security_drop_root: setuid(%d) failed: %s\n",
+            (int)uid, strerror(errno));
+        return -1;
+    }
+
+    return 0;
 }

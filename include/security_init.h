@@ -23,10 +23,23 @@
 #endif
 
 /*
+ * SENSOR_CLIENT_GID - Default group ID for /dev/sensor0 ownership.
+ * Defaults to 1000 (qnxuser). Can be overridden with -DSENSOR_CLIENT_GID=N
+ * on the qcc command line, or resolved via getgrnam("qnxuser") at runtime.
+ * The device node /dev/sensor0 is created with mode 0660 and owned by
+ * root:<client_gid> so that members of the client group can read/write
+ * while others are restricted.
+ */
+#ifndef SENSOR_CLIENT_GID
+#define SENSOR_CLIENT_GID  (gid_t)1000
+#endif
+
+/*
  * PROCMGR_AOP_* flags for ability lockdown in QNX SDP 8.0.
  * We allow ONLY the four required hardware/channel abilities and deny everything else.
  *
- * Step 1: Deny all abilities using PROCMGR_DN_ALL
+ * Step 1: Deny all abilities using PROCMGR_DN_ROOT | PROCMGR_DN_NONROOT
+ *         (QNX SDP 8.0 valid domain flags), terminated with PROCMGR_AID_EOL
  * Step 2: Allow only the four specific abilities and lock them down:
  *   PROCMGR_AID_MEM_PHYS   - physically map device memory (mmap_device_memory)
  *   PROCMGR_AID_INTERRUPT  - attach to hardware interrupts (InterruptAttachEvent)
@@ -54,6 +67,8 @@
  *   3. Drops from UID 0 to target_uid via setgid()/setuid()
  * Returns 0 on success, -1 on error with errno set.
  */
+int security_init_hw_privileges(void);
+int security_drop_root(uid_t uid, gid_t gid);
 int security_init(uid_t target_uid, gid_t target_gid);
 
 /*

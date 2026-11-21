@@ -32,6 +32,8 @@
 #include "driver_interface.h"
 #include "resmgr.h"
 #include "concurrency.h"        /* Zaid: thread pool + notify helpers */
+#include "security_init.h"      /* Lidiya: security_init_hw_privileges(), security_drop_root() */
+#include <grp.h>                /* getgrnam() for SENSOR_CLIENT_GID fallback */
 #ifdef USE_SECURITY_INIT
 #include "security_init.h"      /* Lidiya: security_init_hw_privileges(), security_drop_root() */
 #endif
@@ -289,6 +291,8 @@ dispatch_t *sensor_resmgr_init(void)
     io_funcs.close_ocb = io_close_ocb;
 
     iofunc_attr_init(&attr, S_IFCHR | 0660, NULL, NULL);
+    attr.uid = 0;            /* driver runs as root */
+    attr.gid = SENSOR_CLIENT_GID;  /* group ownership for client access */
     sensor_notify_init(g_notify);
 
     if (resmgr_attach(dpp, &rattr, SENSOR_DEV_PATH, _FTYPE_ANY, 0,
