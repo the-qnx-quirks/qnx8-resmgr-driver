@@ -14,6 +14,13 @@
  * Target UID/GID for root-dropping: default 1000:1000 (non-root user/group).
  * These correspond to the "sensor_driver" user created during container/VM init.
  */
+#ifndef SENSOR_CLIENT_GID
+#define SENSOR_CLIENT_GID 1000
+#endif
+#ifndef SENSOR_DRIVER_UID
+#define SENSOR_DRIVER_UID 1000
+#endif
+
 #ifndef TARGET_UID
 #define TARGET_UID  (uid_t)1000
 #endif

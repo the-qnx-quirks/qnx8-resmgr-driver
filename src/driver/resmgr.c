@@ -321,7 +321,7 @@ dispatch_t *sensor_resmgr_init(void)
     }
 
 #ifdef USE_SECURITY_INIT
-    if (security_drop_root() != 0) {
+    if (security_drop_root(SENSOR_DRIVER_UID, SENSOR_CLIENT_GID) != 0) {
         perror("security_drop_root");
         return NULL;
     }
