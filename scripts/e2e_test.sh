@@ -104,6 +104,7 @@ fi
 
 check_command 'final reset' "$CLIENT" --reset
 check_command 'queue empty after final reset' "$CLIENT" --expect-empty
+check_command 'restore rate to 1000 Hz' "$CLIENT" --rate 1000
 
 printf '\nRESULT: %s passed, %s failed\n' "$passed" "$failed"
 if [ "$failed" -ne 0 ]; then
