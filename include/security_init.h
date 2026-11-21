@@ -23,10 +23,10 @@
 
 /*
  * PROCMGR_AOP_* flags for ability lockdown.
- * We allow ONLY the four required hardware/channel abilities and deny everything else.
+ * We allow ONLY the three hardware abilities and deny everything else.
  */
 #define HW_ABILITIES_ALLOW \
-    (PROCMGR_AID_IO | PROCMGR_AID_INTERRUPT | PROCMGR_AID_MEM_PHYS | PROCMGR_AID_PUBLIC_CHANNEL)
+    (PROCMGR_AID_IO | PROCMGR_AID_INTERRUPT | PROCMGR_AID_MEM_PHYS)
 
 #define ALL_ABILITIES_EOL \
     (PROCMGR_AID_EOL)
@@ -42,27 +42,16 @@
 int security_init_hw_privileges(void);
 
 /*
- * security_drop_root - Drop from UID 0 to the target non-root UID/GID.
- * POSIX requires setgid() before setuid() to prevent privilege escalation
- * via setresuid/setresgid gaps.
- * uid: target non-root UID (typically TARGET_UID = 1000)
- * gid: target non-root GID (typically TARGET_GID = 1000 or SENSOR_CLIENT_GID)
+ * security_drop_root - Drop from UID 0 to target non-root UID.
+ * Must be called AFTER hardware initialization is complete.
  * Returns 0 on success, -1 on error with errno set.
  */
-int security_drop_root(uid_t uid, gid_t gid);
+int security_drop_root(void);
 
 /*
- * security_init - Full least-privilege security initialization.
- * Must be called AFTER resmgr_attach() and hardware MMIO/IRQ initialization is complete.
- * Performs:
- *   1. security_init_hw_privileges() - lock down the four required microkernel abilities
- *      (IO, INTERRUPT, MEM_PHYS, PUBLIC_CHANNEL) using PROCMGR_DN_ROOT|PROCMGR_DN_NONROOT
- *      and PROCMGR_AOP_ALLOW|PROCMGR_AOP_LOCK.
- *   2. security_drop_root(uid, gid) - drop from UID 0 to the target non-root UID/GID.
- *   3. Log every transition to slog2 with clear errno diagnostics.
- * Returns 0 on success, -1 on error with errno set.
+ * security_get_target_uid - Return the target non-root UID.
  */
-int security_init(uid_t target_uid, gid_t target_gid);
+uid_t security_get_target_uid(void);
 
 /*
  * security_get_target_gid - Return the target non-root GID.
