@@ -6,20 +6,73 @@
 #define PERF_TRACE_H_INCLUDED
 
 #include <sys/neutrino.h>
-#include <sys/page.h>  /* for syspage */
-#include <trace.h>
-#include <slog2.h>
+#include <sys/syspage.h>    /* for SYSPAGE_ENTRY(qtime) */
+#include <sys/trace.h>      /* for TraceEvent(), _NTO_TRACE_INSERTUSRSTREVENT_CLASS, _SUBSCRIPTION_CLASS */
+#include <sys/slog2.h>      /* for slog2f */
 #include <stdint.h>
 
 /*
- * TRACE_STAMP_IRQ_PULSE - Record an IRQ pulse event sequence number.
- * Use: TRACE_STAMP_IRQ_PULSE(seq_id)
- *      seq_id: unique sequence identifier for the pulse wakeup
+ * Safe no-op fallback: if tracing is not enabled (TRACE_DISABLED=1),
+ * these macros expand to nothing. The build system can define
+ * TRACE_DISABLED=1 to disable tracing completely; otherwise TraceEvent
+ * calls are harmless no-ops at the kernel level if no subscriber exists.
+ */
+#ifndef TRACE_DISABLED
+#define TRACE_DISABLED 0
+#endif
+
+/*
+ * TRACE_STAMP_ISR - Record an ISR (interrupt service routine) entry/exit event.
+ * Use: TRACE_STAMP_ISR(seq_id)
+ *      seq_id: unique sequence identifier for the ISR
+ * Context: IRQ pulse / interrupt tracking
+ */
+#define TRACE_STAMP_ISR(seq_id) do { \
+    if (!(TRACE_DISABLED)) { \
+        TraceEvent(_NTO_TRACE_INSERTUSRSTREVENT, \
+            _SUBSCRIPTION_CLASS(_NTO_TRACE_USRSTREVENT_CLASS), \
+            (uint16_t)0x01,           /* subclass: ISR */ \
+            (uint64_t)(seq_id),      /* arg0 = seq_id */ \
+            (uint64_t)ClockCycles(), /* arg1 = timestamp */ \
+            (uint64_t)__LINE__,      /* arg2 = source line */ \
+            (uint64_t)(uintptr_t)__FILE__); /* arg3 = source file */ \
+    } \
+} while(0)
+
+/*
+ * TRACE_STAMP_PULSE - Record a user-space pulse wakeup event.
+ * Use: TRACE_STAMP_PULSE(seq_id)
+ *      seq_id: unique sequence identifier for the pulse
  * Context: Aeknath's pulse-driven IRQ wakeup path
  */
-#define TRACE_STAMP_IRQ_PULSE(seq_id) do { \
-    uint64_t __ts_cycles = ClockCycles(); \
-    traceusrinfopulse_((seq_id), __ts_cycles, __LINE__, __FILE__); \
+#define TRACE_STAMP_PULSE(seq_id) do { \
+    if (!(TRACE_DISABLED)) { \
+        TraceEvent(_NTO_TRACE_INSERTUSRSTREVENT, \
+            _SUBSCRIPTION_CLASS(_NTO_TRACE_USRSTREVENT_CLASS), \
+            (uint16_t)0x02,           /* subclass: PULSE */ \
+            (uint64_t)(seq_id),      /* arg0 = seq_id */ \
+            (uint64_t)ClockCycles(), /* arg1 = timestamp */ \
+            (uint64_t)__LINE__,      /* arg2 = source line */ \
+            (uint64_t)(uintptr_t)__FILE__); /* arg3 = source file */ \
+    } \
+} while(0)
+
+/*
+ * TRACE_STAMP_REPLY - Record a message reply / IPC handoff event.
+ * Use: TRACE_STAMP_REPLY(seq_id)
+ *      seq_id: unique sequence identifier for the reply
+ * Context: Zaid's iofunc_notify / thread pool handoff
+ */
+#define TRACE_STAMP_REPLY(seq_id) do { \
+    if (!(TRACE_DISABLED)) { \
+        TraceEvent(_NTO_TRACE_INSERTUSRSTREVENT, \
+            _SUBSCRIPTION_CLASS(_NTO_TRACE_USRSTREVENT_CLASS), \
+            (uint16_t)0x03,           /* subclass: REPLY */ \
+            (uint64_t)(seq_id),      /* arg0 = seq_id */ \
+            (uint64_t)ClockCycles(), /* arg1 = timestamp */ \
+            (uint64_t)__LINE__,      /* arg2 = source line */ \
+            (uint64_t)(uintptr_t)__FILE__); /* arg3 = source file */ \
+    } \
 } while(0)
 
 /*
@@ -30,8 +83,16 @@
  * Context: Basith's user-space MMIO/DMA completion
  */
 #define TRACE_STAMP_MMIO_DONE(seq_id, reg_val) do { \
-    uint64_t __ts_cycles = ClockCycles(); \
-    traceusrstremmio_((seq_id), (reg_val), __ts_cycles, __LINE__, __FILE__); \
+    if (!(TRACE_DISABLED)) { \
+        TraceEvent(_NTO_TRACE_INSERTUSRSTREVENT, \
+            _SUBSCRIPTION_CLASS(_NTO_TRACE_USRSTREVENT_CLASS), \
+            (uint16_t)0x04,           /* subclass: MMIO_DONE */ \
+            (uint64_t)(seq_id),      /* arg0 = seq_id */ \
+            (uint64_t)(reg_val),     /* arg1 = register value */ \
+            (uint64_t)ClockCycles(), /* arg2 = timestamp */ \
+            (uint64_t)__LINE__,      /* arg3 = source line */ \
+            (uint64_t)(uintptr_t)__FILE__); /* arg4 = source file */ \
+    } \
 } while(0)
 
 /*
@@ -41,22 +102,28 @@
  * Context: Zaid's iofunc_notify / I/O pipeline handoff
  */
 #define TRACE_STAMP_CLIENT_DELIVERED(seq_id) do { \
-    uint64_t __ts_cycles = ClockCycles(); \
-    traceusrstrecv_((seq_id), __ts_cycles, __LINE__, __FILE__); \
+    if (!(TRACE_DISABLED)) { \
+        TraceEvent(_NTO_TRACE_INSERTUSRSTREVENT, \
+            _SUBSCRIPTION_CLASS(_NTO_TRACE_USRSTREVENT_CLASS), \
+            (uint16_t)0x05,           /* subclass: CLIENT_DELIVERED */ \
+            (uint64_t)(seq_id),      /* arg0 = seq_id */ \
+            (uint64_t)ClockCycles(), /* arg1 = timestamp */ \
+            (uint64_t)__LINE__,      /* arg2 = source line */ \
+            (uint64_t)(uintptr_t)__FILE__); /* arg3 = source file */ \
+    } \
 } while(0)
 
 /*
  * cycles_to_ns - Convert clock cycle delta to nanoseconds.
  * Uses the global cycles_per_sec from the QNX syspage (qtime).
- * Performance: zero-overhead inline, evaluated at compile time when
- *   cycles_per_sec is a compile-time constant (which it is on QNX 8.0).
+ * Performance: zero-overhead inline, evaluated at link time against
+ *   the running kernel. QNX SDP 8.0 constant.
  *
  * Use: uint64_t ns = cycles_to_ns(delta_cycles);
  */
 static inline uint64_t cycles_to_ns(uint64_t delta_cycles)
 {
-    /* Get cycles_per_sec from the system page.
-     * SYSPAGE_ENTRY is evaluated at link time against the running kernel. */
+    /* Get cycles_per_sec from the system page. */
     uint64_t cycles_per_sec = (uint64_t)
         SYSPAGE_ENTRY(qtime)->cycles_per_sec;
 
@@ -65,10 +132,6 @@ static inline uint64_t cycles_to_ns(uint64_t delta_cycles)
     }
 
     /* ns = (delta_cycles * 1_000_000_000) / cycles_per_sec */
-    /* Use unsigned 128-bit arithmetic implicitly via uint64_t chain:
-     * multiply first, then divide. The intermediate product is */
-    /* calculated in 64-bit; if overflow is a concern, the caller */
-    /* should ensure delta_cycles < cycles_per_sec / 1e9. */
     return (delta_cycles * 1000000000ULL) / cycles_per_sec;
 }
 
@@ -86,18 +149,34 @@ static inline uint64_t cycles_to_ns(uint64_t delta_cycles)
 /* Client delivered subclass code */
 #define USRSTREVENT_SUBCLASS_CLIENT_DELIVERED  ((_USRSTREVENT_SUBCLASS_T)0x03)
 
+/* ISR subclass code */
+#define USRSTREVENT_SUBCLASS_ISR  ((_USRSTREVENT_SUBCLASS_T)0x01)
+
+/* Pulse subclass code */
+#define USRSTREVENT_SUBCLASS_PULSE  ((_USRSTREVENT_SUBCLASS_T)0x02)
+
+/* Reply subclass code */
+#define USRSTREVENT_SUBCLASS_REPLY  ((_USRSTREVENT_SUBCLASS_T)0x03)
+
+/* MMIO done subclass code (duplicate for convenience) */
+#define USRSTREVENT_SUBCLASS_MMIO_DONE2   ((_USRSTREVENT_SUBCLASS_T)0x04)
+
+/* Client delivered subclass code (duplicate for convenience) */
+#define USRSTREVENT_SUBCLASS_CLIENT_DELIVERED2  ((_USRSTREVENT_SUBCLASS_T)0x05)
+
 /*
  * traceusrinfopulse - Internal helper: emit a pulse-style usrstrevent.
  * Maps to TraceEvent(_NTO_TRACE_INSERTUSRSTREVENT, ...)
  *  - class: _SUBSCRIPTION_CLASS(_NTO_TRACE_USRSTREVENT_CLASS)
  *  - subclass: USRSTREVENT_SUBCLASS_IRQ_PULSE
  *  - payload: seq_id (uint64_t), cycles (uint64_t), line (int), file (const char*)
+ *
+ * NOTE: The name "traceusrinfopulse_" from the original file has been
+ *       renamed to avoid confusion; use the TRACE_STAMP_PULSE() macro instead.
  */
 static inline void traceusrinfopulse(uint16_t seq_id, uint64_t cycles)
 {
-    /* Build the payload as a single uint64_t payload for the trace event.
-     * The TraceEvent API takes variadic arguments; we pack seq_id and cycles
-     * into the 2 u64 arguments (arg0 and arg1). */
+    /* Backward-compatibility helper — maps to the original pattern. */
     int retval = TraceEvent(_NTO_TRACE_INSERTUSRSTREVENT,
         _SUBSCRIPTION_CLASS(_NTO_TRACE_USRSTREVENT_CLASS),
         USRSTREVENT_SUBCLASS_IRQ_PULSE,
@@ -105,7 +184,7 @@ static inline void traceusrinfopulse(uint16_t seq_id, uint64_t cycles)
         cycles,                    /* arg1 = timestamp_cycles */
         (uint64_t)__LINE__,        /* arg2 = source line */
         (uint64_t)(uintptr_t)__FILE__); /* arg3 = source file ptr */
-    (void)retval; /* suppress unused warning */
+    (void)retval;
 }
 
 /*
