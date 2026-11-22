@@ -26,5 +26,5 @@ OVERALL RESULT: PASS
 ### Summary of Verified Checks
 - **HAM Supervision:** Confirmed `ham` daemon running and `sensor` entity registered in `/proc/ham`.
 - **`SIGTERM` (`kill`) Respawn:** `my_driver` automatically restarted with a new PID (`315417 -> 761885`) and restored `/dev/sensor0`.
-- **`SIGSEGV` Crash Recovery:** `my_driver` survived a forced segmentation fault, respawned with a new PID (`761885 -> 843806`), and restored `/dev/sensor0`.
-- **Concurrency & Thread Pool:** 3 active driver threads (`-DUSE_THREAD_POOL`) served all 4 parallel client accesses simultaneously (`OVERALL RESULT: PASS`).
+- **`SIGSEGV` Crash Recovery:** `my_driver` crashed on a forced SIGSEGV and was restarted by HAM with a new PID (`761885 -> 843806`), restoring `/dev/sensor0`.
+- **Concurrency & Thread Pool:** 4 parallel clients opened `/dev/sensor0` successfully; the driver had 3 threads (`-DUSE_THREAD_POOL`, `OVERALL RESULT: PASS`).
